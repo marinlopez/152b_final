@@ -43,192 +43,152 @@ output port is assigned to value of memAdr to interfacce with the block ram,
 
 module datapath(
     input clk,
-    input fast_clk,
     input reset,
-    //once I create the wrapper will vivado instantiate these input wires with the same name wires in block diagram
     input [7:0] gpio_cmdreg,
     input [7:0] gpio_mult,
     input [7:0] gpio_offset,
-    //should this be an inout? output the address, input the data read so assign the inout wire to a mux in verilog
     input [31:0] bram_rd,
-    //This is returned when the datapath gives the output bram_address to the block ram and gets the 32 bit value back
-    //input wire [31:0] bram_data,
     
     output [31:0] bram_adr,
-    output [31:0] gpio_rd
-    
-    
-    //I want to write my CMDREG[5:3] signal to the BRAM and read so is an ouput wire correct? will wrapper recognize this
-    //output wire bramaddress;
+    output [31:0] gpio_rd,
+    output bram_en;
+
     );
     //datapath 
     //states 
     parameter idle = 3'b100;
-    parameter read = 3'b000;
-    parameter compliment = 3'b001;
-    parameter offset = 3'b010;
-    parameter mult = 3'b011;
+    parameter decode = 3'b000;
+    parameter memory = 3'b001;
+    parameter execute = 3'b010;
+    parameter stall = 3'b011;
     
-    //FSM output registers
+    //FSM output registers and flags
     reg [31:0] memAdr;
     reg [1:0] operation;
-    reg readyBit;
+    reg adrReadyFlag;
+    reg opReadyFlag;
+    //reg readyBit;
     
-    //FSM to datapath output wire 
-    wire [1:0] operationFSM;
-    
-    //FSM t o datapath wires wires
-    //assign bram_address = memAdr;
-    assign operationFSM = operation;
-    
-    //FSM registers, do I need these since there is no state next?
+    //FSM registers
     reg [2:0] state_current, state_next;
     
     //bram to datapath register
     reg [31:0] data;
     
-    //crossing clock domain registers
-    reg [2:0] CDC_counter;
-    
-    wire [7:0] cmdreg_stretch;
+    //CDC registers
+    reg [7:0] cmdreg_init;
     reg [7:0] cmdreg_metastable;
     reg [7:0] cmdreg_stable;
     
-    wire [7:0] mult_stretch;
-    reg [7:0] mult_metastable;
-    reg [7:0] mult_stable;
     
-    wire [7:0] offset_stretch;
-    reg [7:0] offset_metastable;
-    reg [7:0] offset_stable;
-    
-    //slow to fast
-    reg [31:0] gpio_rd_reg;
+    reg [31:0] gpio_rd_init;
     reg [31:0] gpio_rd_metastable;
     reg [31:0] gpio_rd_stable;
     
-    //crossing clock domain 
-    //datapath assignments
-    //memAdr register that is from FSM will be assigned to datapath output wire bram_adr which will connect to BRAM to get data
-    // should this be assigned elsewhere after dp always block?
+    //continous assignments
     assign bram_adr = memAdr;
-    //input bram_rd which is the data from bram_adr is assigned to data register to be executed
     assign bram_rd = data;
-    
-    assign gpio_rd = gpio_rd_reg;
-    
-    //STILL NEED TO DOUBLE FLOP GPIO_RD
-    //slow to fast
-    always @(posedge fast_clk) begin
-        if(reset) begin
-            gpio_rd_metastable <= 32'b0;
-            gpio_rd_stable <= 32'b0;
-        end else begin
-            gpio_rd_metastable <= gpio_rd_reg;
-            gpio_rd_stable <= gpio_rd_metastable;
-        end
-    end 
-    
-    //on posedge of fast_clk count 4 clock cycles
-    always @(posedge fast_clk) begin
-        if(reset) begin
-            CDC_counter <= 3'b0;
-        end else begin
-            if(gpio_cmdreg[0] == 1'b1) begin
-                CDC_counter <= 3'b100;
-            end
-            if(CDC_counter > 0) begin
-                CDC_counter <= CDC_counter - 1;
-            end
-        end
-    end
-    
-    assign cmdreg_stretch = (CDC_counter > 0) ? gpio_cmdreg : 0;
-    assign mult_stretch = (CDC_counter > 0) ? gpio_mult : 0;
-    assign offset_stretch = (CDC_counter > 0) ? gpio_offset :0;
-    
-    //datapath 75 Mhz clk
+    assign gpio_rd = gpio_rd_init;
+    assign gpio_cmdreg = cmdreg_init;
+
+    //CDC synchronizer for GPIO_RD
     always @(posedge clk) begin
         if(reset) begin
-            cmdreg_metastable <= 0;
-            cmdreg_stable <= 0;
-            mult_metastable <= 0;
-            mult_stable <= 0;
-            offset_metastable <= 0;
-            offset_stable <= 0;
+            gpio_rd_metastable <= 32'd0;
+            gpio_rd_stable <= 32'd0;
+        end begin
+            gpio_rd_metastable <= gpio_rd_init;
+            gpio_rd_stable <= gpio_rd_metastable;
+        end
+    end
+
+    //CDC syncrhonizer for cmdreg
+    always @(posedge clk) begin
+        if(reset) begin
+            cmdreg_metastable <= 32'd0;
+            cmdreg_stable <= 32'd0;
         end else begin
-            cmdreg_metastable <= cmdreg_stretch;
-            cmdreg_stable <= cmdreg_metastable;  
-            
-            mult_metastable <= mult_stretch;
-            mult_stable <= mult_metastable;
-            
-            offset_metastable <= offset_stretch;
-            offset_stable <= offset_metastable;
-        end  
+            cmdreg_metastable <= cmdreg_init;
+            cmdreg_stable <= cmdreg_metastable;
+        end
     end
     
-    //FSM
-    //how do i signify when to use FSM
+    //datapath / FSM control
     always @* begin
         if(~reset) begin
-            memAdr = 32'b000;
-            operation = 2'b00;
-            readyBit = 1'b0;
+            operation = 2'd0;
+            memAdr = 32'd0;
+            adrReadyFlag = 1'b0;
+            opReadyFlag = 1'b0;
             state_next = idle;
         end else begin
             case(state_current)
             
             idle: begin
+                //new instruction if in this stage and cmdreg_stable[0] == 1
                 if(cmdreg_stable[0]) begin
-                //set condition here for rising edge of pulse
-                    if(cmdreg_stable[7:6] == read) begin
-                        state_next = read;
-                    end else if (cmdreg_stable[7:6] == compliment) begin
-                        state_next = compliment;
-                    end else if (cmdreg_stable[7:6] == offset) begin
-                        state_next = offset;
-                    end else if (cmdreg_stable[7:6] == mult) begin
-                        state_next = mult;
-                    end 
+                    state_next = decode;
                 end else begin
                     state_next = idle;
                 end
             end
-                       
-            read: begin
-                //disable the multiply and offset gpio?
-                memAdr = cmdreg_stable[5:3];
-                operation = cmdreg_stable[7:6];
-                readyBit = cmdreg_stable[0];
-                //do i have to do this
-                cmdreg_stable[0] = 1'b0;
-                state_next = idle;                   
-            end
-            
-            compliment: begin
-                memAdr = cmdreg_stable[5:3];
-                operation = cmdreg_stable[7:6];
-                readyBit = cmdreg_stable[0];
-            end
-            
-            //use a mux to decide weather to use these or not
-            offset: begin
-                memAdr = cmdreg_stable[5:3];
-                operation = cmdreg_stable[7:6];
-                readyBit = cmdreg_stable[0];
-            end 
-            
-            mult: begin
-                memAdr = cmdreg_stable[5:3];
-                operation = cmdreg_stable[7:6];
-                readyBit = cmdreg_stable[0];
-            end
-            
-            default: begin
-                memAdr = 3'b000;
-                operation = 2'b00;
-                readyBit = 1'b0;
+
+            decode: begin
+                //get and store memory address and operation
+                if(cmdreg_stable[5:3] == 3'b000) begin
+                    memAdr = 8'h0;
+                    adrReadyFlag = 1'b1;
+                end else if(cmdreg_stable[5:3] == 3'b001) begin
+                    memAdr = 8'h4;
+                    adrReadyFlag = 1'b1;
+                end else if(cmdreg_stable[5:3] == 3'b010) begin
+                    memAdr = 8'h8;
+                    adrReadyFlag = 1'b1;
+                end else if(cmdreg_stable[5:3] == 3'b011) begin
+                    memAdr = 8'h12;
+                    adrReadyFlag = 1'b1;
+                end else if(cmdreg_stable[5:3] == 3'b100) begin
+                    memAdr = 8'h16;
+                    adrReadyFlag = 1'b1;
+                end else if(cmdreg_stable[5:3] == 3'b101) begin
+                    memAdr = 8'h20;
+                    adrReadyFlag = 1'b1;
+                end else if(cmdreg_stable[5:3] == 3'b110) begin
+                    memAdr = 8'h24;
+                    adrReadyFlag = 1'b1;
+                end else if(cmdreg_stable[5:3] == 3'b111) begin
+                    memAdr = 8'h28;
+                    adrReadyFlag = 1'b1;
+                end else begin
+                    state_next = stall; //since none of the memory locations coincide but cmdreg[0] = 1, just stall until its 0. 
+                end
+
+                if(cmdreg_stable[7:6] == 2'b00) begin //read
+                    operation = 2'b00;
+                    opReadyFlag = 1'b1;
+                end else if(cmdreg_stable[7:6] == 2'b01) begin //compliment
+                    operation = 2'b01;
+                    opReadyFlag = 1'b1;
+                end else if(cmdreg_stable[7:6] == 2'b10) begin //offset
+                    operation = 2'b10;
+                    opReadyFlag = 1'b1;
+                end else if(cmdreg_stable[7:6] == 2'b11) begin //multiplication
+                    operation = 2'b11;
+                    opReadyFlag = 1'b1;
+                end else begin
+                    state_next = stall; //same as before
+                end
+
+                if(opReadyFlag == 1 && adrReadyFlag == 1) begin
+                    state_next = memory;
+                end else begin
+                    state_next = stall; //should never reach this stage
+                end
+            end                   
+        
+            // I can probably combine decode and memory into 1 stage if i set bram_en to 1 at the beginnning of decode
+            memory: begin // I can manipulate enable signal here, I can set it to an output wire which restricts enable of bram so it can only be used in this state
+                bram_en = 1'b1;
             end
             endcase
         end
